@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hmclab_isaac"
+version = "0.0.1"
+description = "HMCLab shared Isaac Sim / Isaac Lab codebase"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "numpy>=1.26",
+]
+
+[tool.setuptools.packages.find]
+include = ["hmclab_isaac*"]

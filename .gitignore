@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+build/
+dist/
+logs/
+outputs/
+*.usd.backup
+.vscode/
+.idea/
+
+# RL training artifacts
+*.pt
+*.ckpt
+
+# OS / editor
+.DS_Store
+*.swp
+*~
