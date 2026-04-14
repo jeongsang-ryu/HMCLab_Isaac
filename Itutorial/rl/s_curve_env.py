@@ -101,8 +101,11 @@ class SCurveEnvCfg(DirectRLEnvCfg):
     smoothness_weight: float = -0.02
     steer_rate_weight: float = -0.3           # relaxed for higher cornering speed
     off_track_weight: float = -3.0
-    wall_penalty_weight: float = 0.0
-    wall_danger_dist: float = 0.10
+    wall_penalty_weight: float = -3.0
+    wall_danger_dist: float = 0.18
+    wall_crash_dist: float = 0.08
+    wall_crash_steps: int = 5
+    wall_crash_penalty: float = -5.0
     centerline_weight: float = 0.5
     centerline_sigma: float = 0.8
     alive_bonus: float = 0.01
@@ -110,8 +113,8 @@ class SCurveEnvCfg(DirectRLEnvCfg):
     backward_bonus: float = 0.0
 
     # ---- Termination ----
-    off_track_threshold: float = 1.2        # soft boundary
-    terminate_cte: float = 1.6              # hard termination
+    off_track_threshold: float = 0.85       # soft boundary (inside duct wall)
+    terminate_cte: float = 0.95             # hard termination (duct pipe @1.0m)
     flip_up_z_threshold: float = 0.35
 
 
@@ -151,6 +154,9 @@ class SCurveEnv(DirectRLEnv):
         # Per-env state buffers
         self._prev_progress = torch.zeros(self.num_envs, device=self.device)
         self._prev_actions = torch.zeros(self.num_envs, 2, device=self.device)
+        self._wall_contact_steps = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.int32
+        )
 
     # ------------------------------------------------------------------
     # Scene setup
@@ -332,12 +338,21 @@ class SCurveEnv(DirectRLEnv):
         wall_danger = (lidar_min < self.cfg.wall_danger_dist).float()
         wall_r = self.cfg.wall_penalty_weight * wall_danger
 
+        crash_now = lidar_min < self.cfg.wall_crash_dist
+        self._wall_contact_steps = torch.where(
+            crash_now,
+            self._wall_contact_steps + 1,
+            torch.zeros_like(self._wall_contact_steps),
+        )
+        crashed = self._wall_contact_steps >= self.cfg.wall_crash_steps
+        crash_r = crashed.float() * self.cfg.wall_crash_penalty
+
         alive_r = torch.full(
             (self.num_envs,), self.cfg.alive_bonus, device=self.device
         )
 
         total = (progress_r + speed_r + smooth_r + steer_rate_r
-                 + off_r + wall_r + center_r + back_penalty + alive_r)
+                 + off_r + wall_r + crash_r + center_r + back_penalty + alive_r)
 
         self.extras["log"] = {
             "reward/progress":  progress_r.mean().item(),
@@ -347,6 +362,7 @@ class SCurveEnv(DirectRLEnv):
             "reward/steer_rt":  steer_rate_r.mean().item(),
             "reward/off":       off_r.mean().item(),
             "reward/wall":      wall_r.mean().item(),
+            "reward/crash":     crash_r.mean().item(),
             "reward/alive":     alive_r.mean().item(),
             "reward/total":     total.mean().item(),
             "info/speed":       speed.mean().item(),
@@ -374,7 +390,9 @@ class SCurveEnv(DirectRLEnv):
 
         fallen = root_pos[:, 2] < -0.3
 
-        terminated = off | flipped | fallen
+        crashed = self._wall_contact_steps >= self.cfg.wall_crash_steps
+
+        terminated = off | flipped | fallen | crashed
         truncated = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, truncated
 
@@ -413,3 +431,4 @@ class SCurveEnv(DirectRLEnv):
 
         self._prev_progress[env_ids] = self._cum_lengths[rand_idx]
         self._prev_actions[env_ids] = 0.0
+        self._wall_contact_steps[env_ids] = 0

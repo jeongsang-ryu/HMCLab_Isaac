@@ -1,0 +1,44 @@
+codename: TOY_01_4WD
+description: "F1Tenth Toy 4WD + prismatic suspension (4 wheels)"
+
+# ━━━ Level 1: Chassis (물리 + 구동) ━━━
+chassis:
+  usd: hmclab_isaac/robots/racing/f1tenth_mid360/assets/configuration/f1tenth_mid360_physics_suspended.usd
+
+vehicle:
+  module: hmclab_isaac.robots.racing.f1tenth_toy.toy01_4wd_sus_cfg
+  cfg: TOY01_4WD_SUS_CFG
+  wheelbase: 0.2255
+  wheel_radius: 0.0365
+  max_steer: 0.6
+  init_z: 0.06
+
+control:
+  steer_regex: "steering_joint"
+  drive_regex: "wheel_joint$"  # 4WD — all four wheels
+  force_steer: true
+
+actuator_overrides:
+  steering:
+    joint_names_expr: ["front_.*_steering_joint"]
+    stiffness: 8000
+    damping: 200
+    effort_limit_sim: 500
+  drive:
+    joint_names_expr: ["(front|rear)_.*_wheel_joint$"]
+    stiffness: 0
+    damping: 20
+    effort_limit_sim: 8
+  suspension:
+    joint_names_expr: [".*_sus_joint"]
+    stiffness: 0
+    damping: 0
+    effort_limit_sim: 0
+
+# ━━━ Level 2: Sensors ━━━
+sensors:
+  - name: mid360
+    usd: hmclab_isaac/robots/racing/f1tenth_toy/sensors/mid360.usd
+    mount_link: base_link
+    offset: [0.05, 0.0, 0.12]
+    description: "Livox Mid-360 3D LiDAR"

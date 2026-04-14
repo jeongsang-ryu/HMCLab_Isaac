@@ -18,10 +18,10 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--steps", type=int, default=120)
-parser.add_argument("--robot", type=str, default="f1tenth")
+parser.add_argument("--robot", type=str, default="TOY_01")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
-args.headless = True
+args.headless = False
 args.enable_cameras = True
 launcher = AppLauncher(args)
 simulation_app = launcher.app
@@ -72,25 +72,28 @@ def main() -> int:
     )
 
     sim.reset()
-    topdown.on_reset()
-    chase.on_reset()
+    # topdown.on_reset()
+    # chase.on_reset()
     print(
         f">>> spawned {spec.name} — joints={ego.num_joints} bodies={ego.num_bodies}",
         flush=True,
     )
 
-    for i in range(args.steps):
+    # for i in range(args.steps):
+    while simulation_app.is_running():
+
         sim.step()
         ego.update(sim.get_physics_dt())
-        if i % 2 == 0:
-            topdown.capture_frame()
+        # if i % 2 == 0:
+        if True:
+            # topdown.capture_frame()
             pos = ego.data.root_pos_w[0].cpu().numpy()
             q = ego.data.root_quat_w[0].cpu().numpy()
             import math
             w, x, y, z = float(q[0]), float(q[1]), float(q[2]), float(q[3])
             yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
-            chase.update_follow((float(pos[0]), float(pos[1]), float(pos[2])), yaw)
-            chase.capture_frame()
+            # chase.update_follow((float(pos[0]), float(pos[1]), float(pos[2])), yaw)
+            # chase.capture_frame()
 
     pos = ego.data.root_pos_w[0]
     print(

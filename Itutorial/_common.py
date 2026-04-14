@@ -123,8 +123,25 @@ class RobotSpec:
 
 
 def get_robot_spec(name: str) -> RobotSpec:
+    # Try YAML registry first (exact codename like TOY_01, MUSHR_01)
+    try:
+        from robots import load_robot
+        spec = load_robot(name)
+        return RobotSpec(
+            name=spec.codename,
+            cfg=spec.cfg,
+            wheelbase=spec.wheelbase,
+            wheel_radius=spec.wheel_radius,
+            max_steer=spec.max_steer,
+            steer_regex=spec.steer_regex,
+            drive_regex=spec.drive_regex,
+            init_z=spec.init_z,
+        )
+    except (KeyError, ImportError):
+        pass
+    # Fallback to legacy name matching
     name = name.lower()
-    if name in ("f1tenth", "f1"):
+    if name in ("f1tenth_toy", "f1tenth", "f1"):
         from isaaclab.actuators import ImplicitActuatorCfg
         from hmclab_isaac.robots.racing.f1tenth_mid360 import (
             F1TENTH_MID360_CFG,
@@ -163,7 +180,7 @@ def get_robot_spec(name: str) -> RobotSpec:
             }
         )
         return RobotSpec(
-            name="f1tenth",
+            name="f1tenth_toy",
             cfg=f1_cfg,
             wheelbase=WHEELBASE,
             wheel_radius=WHEEL_RADIUS,

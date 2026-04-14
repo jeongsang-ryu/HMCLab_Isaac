@@ -1,0 +1,45 @@
+codename: TOY_01
+description: "F1Tenth Toy — 1/10 scale, chassis/sensor 분리 구조"
+
+# ━━━ Level 1: Chassis (물리 + 구동) ━━━
+chassis:
+  usd: hmclab_isaac/robots/racing/f1tenth_toy/chassis/TOY_01_chassis.usd
+
+vehicle:
+  module: hmclab_isaac.robots.racing.f1tenth_mid360
+  cfg: F1TENTH_MID360_CFG
+  wheelbase: 0.2255
+  wheel_radius: 0.0365
+  max_steer: 0.6
+  init_z: 0.05
+
+control:
+  steer_regex: "steering"
+  drive_regex: "rear.*wheel_joint"
+  force_steer: true
+
+actuator_overrides:
+  steering:
+    joint_names_expr: ["front_.*_steering_joint"]
+    stiffness: 8000
+    damping: 200
+    effort_limit_sim: 500
+  drive:
+    joint_names_expr: ["rear_.*_wheel_joint"]
+    stiffness: 0
+    damping: 30
+    effort_limit_sim: 15
+  front_wheels:
+    joint_names_expr: ["front_.*_wheel_joint"]
+    stiffness: 0
+    damping: 0.5
+    effort_limit_sim: 0
+
+# ━━━ Level 2: Sensors (비주얼 + 관측) ━━━
+# 카메라와 LiDAR만 개별 관리. NUC 등 기타 부품은 샤시에 포함.
+sensors:
+  - name: mid360
+    usd: hmclab_isaac/robots/racing/f1tenth_toy/sensors/mid360.usd
+    mount_link: base_link
+    offset: [0.05, 0.0, 0.12]
+    description: "Livox Mid-360 3D LiDAR"

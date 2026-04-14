@@ -1,0 +1,18 @@
+codename: MUSHR_01
+description: "MuSHR Nano v2, 1/10 scale, RWD (4WD disabled), passive suspension"
+
+vehicle:
+  module: hmclab_isaac.robots.racing.mushr_nano_v2.mushr_nano_v2_cfg
+  cfg: MUSHR_NANO_V2_CFG
+  wheelbase: 0.32
+  wheel_radius: 0.05
+  max_steer: 0.4
+  init_z: 0.08
+
+control:
+  steer_regex: "wheel_steer$"
+  drive_regex: "back.*wheel_throttle$"
+  force_steer: true
+
+post_spawn:
+  add_chassis_collider: true
