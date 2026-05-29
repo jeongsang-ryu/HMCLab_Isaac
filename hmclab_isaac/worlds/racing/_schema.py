@@ -73,17 +73,18 @@ class RacingTrack:
         closed: bool = True,
     ) -> "RacingTrack":
         """Build from legacy 2D data (x, y, w_left, w_right). Fills z=rpy=0
-        and computes yaw from the path tangent for vehicle spawning."""
+        and computes yaw from the path tangent for vehicle spawning.
+
+        Uses **forward differences** for tangent (xy[i+1]-xy[i]) rather than
+        centered differences. Centered differences can vanish at sharp
+        cusps (when xy[i+1] ≈ xy[i-1]) and yield arbitrary yaws there;
+        forward diff is robust as long as adjacent samples are distinct.
+        """
         n = len(xy)
         positions = np.zeros((n, 3), dtype=np.float64)
         positions[:, 0:2] = xy
         rpy = np.zeros((n, 3), dtype=np.float64)
-        tangent = np.zeros_like(xy)
-        for i in range(n):
-            nxt = (i + 1) % n if closed else min(i + 1, n - 1)
-            prv = (i - 1) % n if closed else max(i - 1, 0)
-            tangent[i] = xy[nxt] - xy[prv]
-        rpy[:, 2] = np.arctan2(tangent[:, 1], tangent[:, 0])
+        rpy[:, 2] = _forward_diff_yaw(xy, closed=closed)
         widths = np.stack([d_left, d_right], axis=1)
         return cls(name=name, positions=positions, rpy=rpy, widths=widths, closed=closed)
 
@@ -113,6 +114,102 @@ class RacingTrack:
         idx = int(progress * self.num_points) % self.num_points
         return self.positions[idx].copy(), self.rpy[idx].copy()
 
+    def densify(self, sub: int) -> "RacingTrack":
+        """Return a new RacingTrack with ``sub`` linearly-interpolated
+        intermediate points inserted between each pair of adjacent samples.
+
+        Positions and widths are linearly interpolated; yaw is
+        **recomputed** from forward-diff of the densified positions to
+        avoid the wrap-around bug (linear interp of yaws near ±π flips
+        them by 180°, which causes downstream mesh builders to place the
+        left/right boundary on the wrong side → visible ring artifacts).
+        """
+        if sub <= 1:
+            return self
+        n = self.num_points
+        last = n if self.closed else n - 1
+        new_pos = []
+        new_w = []
+        for i in range(last):
+            j = (i + 1) % n
+            for k in range(sub):
+                t = k / sub
+                new_pos.append(self.positions[i] * (1 - t) + self.positions[j] * t)
+                new_w.append(self.widths[i] * (1 - t) + self.widths[j] * t)
+        if not self.closed:
+            new_pos.append(self.positions[-1])
+            new_w.append(self.widths[-1])
+        new_pos = np.array(new_pos)
+        new_w = np.array(new_w)
+        # Re-derive yaw from forward-diff of new positions
+        new_rpy = np.zeros((len(new_pos), 3), dtype=np.float64)
+        new_rpy[:, 2] = _forward_diff_yaw(new_pos[:, :2], closed=self.closed)
+        return RacingTrack(
+            name=self.name,
+            positions=new_pos, rpy=new_rpy, widths=new_w, closed=self.closed,
+        )
+
+    def tangents(self) -> np.ndarray:
+        """Per-point unit tangent vectors in world XY plane, shape (N, 2).
+
+        Computed from forward-difference of positions; for the last point on
+        an open track, falls back to the previous segment direction.
+        """
+        xy = self.positions[:, :2]
+        n = len(xy)
+        t = np.zeros((n, 2), dtype=np.float64)
+        for i in range(n):
+            nxt = (i + 1) % n if self.closed else min(i + 1, n - 1)
+            dx = xy[nxt, 0] - xy[i, 0]
+            dy = xy[nxt, 1] - xy[i, 1]
+            mag = float(np.hypot(dx, dy))
+            if mag < 1e-12:
+                t[i] = t[i - 1] if i > 0 else np.array([1.0, 0.0])
+            else:
+                t[i, 0] = dx / mag
+                t[i, 1] = dy / mag
+        return t
+
+    def arclen(self) -> np.ndarray:
+        """Cumulative arc-length from start, shape (N,). Always starts at 0."""
+        xy = self.positions[:, :2]
+        diffs = np.diff(xy, axis=0)
+        seg = np.linalg.norm(diffs, axis=1)
+        s = np.concatenate([[0.0], np.cumsum(seg)])
+        return s
+
+    def curvatures(self) -> np.ndarray:
+        """Per-point discrete curvature (1/radius), shape (N,).
+
+        Uses the Menger curvature of three consecutive points
+        (i-1, i, i+1): kappa = 4 * area / (|a| * |b| * |c|). For a closed
+        loop wraps the indices; for an open track endpoints get 0.
+        """
+        xy = self.positions[:, :2]
+        n = len(xy)
+        kappa = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            if self.closed:
+                im = (i - 1) % n
+                ip = (i + 1) % n
+            else:
+                if i == 0 or i == n - 1:
+                    continue
+                im, ip = i - 1, i + 1
+            p0 = xy[im]
+            p1 = xy[i]
+            p2 = xy[ip]
+            a = float(np.linalg.norm(p1 - p0))
+            b = float(np.linalg.norm(p2 - p1))
+            c = float(np.linalg.norm(p2 - p0))
+            denom = a * b * c
+            if denom < 1e-12:
+                continue
+            # 2x triangle area via cross product z-component
+            cross = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0])
+            kappa[i] = 2.0 * cross / denom   # signed curvature (+ = left turn)
+        return kappa
+
     def boundary_points(self) -> tuple[np.ndarray, np.ndarray]:
         """Compute left/right boundary point arrays in world frame.
 
@@ -133,6 +230,28 @@ class RacingTrack:
 # ----------------------------------------------------------------------
 # Internal helpers
 # ----------------------------------------------------------------------
+def _forward_diff_yaw(xy: np.ndarray, *, closed: bool) -> np.ndarray:
+    """Compute per-point yaw from forward-difference tangents of 2D xy data.
+
+    Returned yaws are in [-pi, pi] (np.arctan2 convention). If a forward
+    segment has zero length, reuse the previous yaw to avoid undefined
+    arctan2(0, 0) artifacts.
+    """
+    n = len(xy)
+    yaws = np.zeros(n, dtype=np.float64)
+    prev = 0.0
+    for i in range(n):
+        nxt = (i + 1) % n if closed else min(i + 1, n - 1)
+        dx = float(xy[nxt, 0] - xy[i, 0])
+        dy = float(xy[nxt, 1] - xy[i, 1])
+        if dx == 0.0 and dy == 0.0:
+            yaws[i] = prev
+        else:
+            yaws[i] = float(np.arctan2(dy, dx))
+            prev = yaws[i]
+    return yaws
+
+
 def _rpy_to_matrix(rpy: np.ndarray) -> np.ndarray:
     """Roll-pitch-yaw (XYZ intrinsic, ROS convention) to 3x3 rotation matrix."""
     r, p, y = rpy

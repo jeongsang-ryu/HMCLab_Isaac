@@ -1,0 +1,12 @@
+"""UNICORN — SRC chassis family. Variants are 1:1 with their USD/.py file."""
+from . import UNICORN_1, UNICORN_2, UNICORN_3, UNICORN_4  # noqa: F401
+
+UNICORN_1_CFG = UNICORN_1.CFG
+UNICORN_2_CFG = UNICORN_2.CFG
+UNICORN_3_CFG = UNICORN_3.CFG
+UNICORN_4_CFG = UNICORN_4.CFG
+
+__all__ = [
+    "UNICORN_1", "UNICORN_2", "UNICORN_3", "UNICORN_4",
+    "UNICORN_1_CFG", "UNICORN_2_CFG", "UNICORN_3_CFG", "UNICORN_4_CFG",
+]

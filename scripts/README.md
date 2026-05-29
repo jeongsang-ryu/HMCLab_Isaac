@@ -1,62 +1,64 @@
 # scripts/
 
-공용 검증/변환 스크립트 모음.
+차량/센서 관련 USD 빌드 + 텔레옵 + 진단 스크립트.
 
-## verify_install.py
+## 텔레옵 (운전)
 
-`INSTALL.md` 5단계 마지막에서 호출. Python/Sim/Lab/torch/hmclab_isaac 임포트와 CUDA 체크.
+키보드 + Linux 조이스틱 (`/dev/input/jsX`) 둘 다 지원 — 두 입력 모두 활성, 조이스틱이 활성이면 그게 우선.
+
+| 스크립트 | 대상 | 비고 |
+|---|---|---|
+| `keyboard_teleop_chassis.py` | `chassis/SRX/SRC_simple.usd` (UNICORN_2 actuator cfg 재사용) | LiDAR 없음, 가벼움 |
+| `keyboard_teleop_lidar.py`   | HAMA_1/HAMA_2/UNICORN_1/UNICORN_2 (LiDAR 디버그 viz 포함) | `--vehicle <NAME>` |
+| `keyboard_teleop_mushr.py`   | MuSHR (WheeledLab USD) — UNICORN 비교 reference | |
+
+조이스틱 매핑 디폴트 (Xbox-style): 왼쪽 스틱 Y = 스로틀, 오른쪽 스틱 X = 조향, A 버튼 = 브레이크. 본인 패드 매핑은 `joystick_probe.py` 로 확인 후 `--js-axis-steer N` / `--js-axis-throttle M` 등으로 오버라이드.
+
+```bash
+# 평지:
+OMNI_KIT_ACCEPT_EULA=YES python scripts/keyboard_teleop_chassis.py
+# 트랙:
+OMNI_KIT_ACCEPT_EULA=YES python scripts/keyboard_teleop_chassis.py --track mini_oval_banked
+# 조이스틱 끄기:
+OMNI_KIT_ACCEPT_EULA=YES python scripts/keyboard_teleop_chassis.py --joystick ""
+```
+
+공통 입력 코드는 `hmclab_isaac/utils/teleop_input.py` (LinuxJoystick + CarKeyboard + CarController).
+
+## 진단
+
+| 스크립트 | 용도 |
+|---|---|
+| `joystick_probe.py`         | `/dev/input/jsX` 이벤트 실시간 출력 (axis/button 번호 확인용) |
+| `inspect_vehicle_mass.py`   | 차량 mass 분포 + CG + 휠리 임계 |
+| `compare_drive.py`          | MuSHR vs UNICORN_2 6초 시퀀스 헤드리스 비교 (CSV 로그) |
+| `verify_install.py`         | 설치 sanity (Python/Sim/Lab/torch/hmclab_isaac import + CUDA) |
 
 ```bash
 OMNI_KIT_ACCEPT_EULA=YES python scripts/verify_install.py
 ```
 
-## smoke_all.py
+## USD 빌드 파이프라인
 
-M1–M6 전체 smoke test를 한 번에 돌림. 각 테스트는 자기만의 Python 프로세스에서 돌고, 실패하면 해당 테스트 로그를 가리킴.
+| 스크립트 | 용도 |
+|---|---|
+| `build_chassis_variants.py` | SRC chassis 변형 (SRC_simple, SRC_dw 등) 빌드 |
+| `build_vehicles.py`         | HAMA_*, UNICORN_*, ROBORACER 어셈블리 (chassis + device 결합) |
+| `build_tire_material.py`    | tire 마찰/compliant material 재빌드 + chassis USD 에 binding |
+| `author_lidar_schemas.py`   | Mid-360 / Hokuyo USD 에 RTX LiDAR Camera 스키마 author |
 
-```bash
-OMNI_KIT_ACCEPT_EULA=YES python scripts/smoke_all.py
-```
+## 트랙
 
-**옵션:**
-- `--only <names>` — 일부만 실행 (쉼표 구분): `--only racing_demo,rover_spawn`
-- `--skip <names>` — 일부만 제외
-- `--fast-fail` — 첫 실패 즉시 종료
-- `--log-dir PATH` — 로그 디렉토리 변경 (기본 `/tmp/hmclab_smoke`)
+| 스크립트 | 용도 |
+|---|---|
+| `generate_3d_tracks.py`     | `worlds/racing/_tracks_data/*.txt` 트랙 생성 |
 
-**예상 실행시간:** Kit 캐시가 따뜻하면 **~40초**, 콜드 부팅이면 ~2분.
+## 실행 환경
 
-**커버리지:**
-| 이름 | 마일스톤 | 검증 대상 |
-|---|---|---|
-| schema | M1 | RacingTrack 로더 + 쿼리 |
-| track_build | M3 | `build_circuit_mesh` (Kit 없이) |
-| racing_demo | M4 | F1Tenth 1 env + Austin 트랙 + 10 step |
-| racing_solo | M4 | F1Tenth 16 env solo |
-| racing_h2h | M4 | Ego + Opponent + 동적 LiDAR 타겟 |
-| rover_spawn | M5 | ExoMy 스폰 + 조인트 검증 + 10 step |
-| offroad_demo | M6 | ExoMy 1 env + rough terrain |
-| offroad_nav | M6 | ExoMy 8 env goal 네비게이션 |
-
-**제외:** M7 ROS2 (deferred — `docs/deferred_m7_ros2.md` 참고)
-
-## smoke_m4.py / smoke_m5.py / smoke_m6.py / smoke_m7.py
-
-개별 마일스톤 단독 실행. `smoke_all.py`가 내부적으로 호출해요. 디버깅할 때 직접 실행 가능:
+모든 Isaac Sim 의존 스크립트는 다음 환경 변수가 필요:
 
 ```bash
-python scripts/smoke_m4.py --which demo --steps 20
-python scripts/smoke_m5.py
-python scripts/smoke_m6.py --which nav --steps 20
+export OMNI_KIT_ACCEPT_EULA=YES
 ```
 
-## convert_f1tenth_track.py
-
-f1tenth_racetracks `*_centerline.csv` (2D, 4컬럼) → HMCLab_Isaac `RacingTrack` 스키마 (3D, 8컬럼) 변환.
-
-```bash
-python scripts/convert_f1tenth_track.py \
-  --src /path/to/reference_repos/f1tenth_racetracks/Monza/Monza_centerline.csv \
-  --dst hmclab_isaac/worlds/racing/_tracks_data/monza.txt \
-  --name monza
-```
+권장 Python: `/home/js/anaconda3/envs/hmclab_test/bin/python`.

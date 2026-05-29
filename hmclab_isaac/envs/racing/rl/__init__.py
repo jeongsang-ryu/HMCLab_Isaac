@@ -1,1 +1,1 @@
-"""Parallel RL envs (multi-env, headless training)."""
+from . import single_agent  # noqa: F401

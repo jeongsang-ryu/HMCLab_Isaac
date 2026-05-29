@@ -42,7 +42,14 @@ def _track_frames(track: RacingTrack) -> tuple[np.ndarray, np.ndarray, np.ndarra
     """Return (positions_3d, left_dir, up_dir, tangent) per point.
 
     If the track has nonzero rpy, use the local rotation matrix. Otherwise
-    fall back to Frenet-style frames derived from the path tangent.
+    derive a smooth path frame from the centerline using **forward
+    differences** (not centered) and propagating left/up with a parallel
+    transport frame so the cross-section never collapses in tight turns.
+
+    The previous centered-difference Frenet fallback failed at near-cusps
+    where ``positions[i+1] ≈ positions[i-1]``: the tangent vanished, got
+    clamped to a near-arbitrary unit vector, and the resulting cross-
+    sections produced twisted/ring-shaped artifacts in the duct mesh.
     """
     positions = track.positions.astype(np.float32)
     n = len(positions)
@@ -57,20 +64,72 @@ def _track_frames(track: RacingTrack) -> tuple[np.ndarray, np.ndarray, np.ndarra
             tangent[i] = R @ np.array([1.0, 0.0, 0.0])
             left[i] = R @ np.array([0.0, 1.0, 0.0])
             up[i] = R @ np.array([0.0, 0.0, 1.0])
-    else:
-        # 2D Frenet fallback — tangent from centered finite diff, left from
-        # cross product with world up.
-        tangent = np.zeros((n, 3), dtype=np.float32)
-        for i in range(n):
-            nxt = (i + 1) % n if track.closed else min(i + 1, n - 1)
-            prv = (i - 1) % n if track.closed else max(i - 1, 0)
-            d = positions[nxt] - positions[prv]
-            d[2] = 0.0
-            norm = np.linalg.norm(d)
-            tangent[i] = d / max(norm, 1e-8)
-        up = np.tile(np.array([0.0, 0.0, 1.0], dtype=np.float32), (n, 1))
-        left = np.cross(up, tangent)
-        left /= np.maximum(np.linalg.norm(left, axis=1, keepdims=True), 1e-8)
+        return positions, left, up, tangent
+
+    # ---- 2D path frame via forward-diff tangent + PT-frame propagation ----
+    tangent = np.zeros((n, 3), dtype=np.float32)
+    for i in range(n):
+        nxt = (i + 1) % n if track.closed else min(i + 1, n - 1)
+        d = positions[nxt] - positions[i]
+        d[2] = 0.0
+        nrm = np.linalg.norm(d)
+        if nrm < 1e-8:
+            # zero-length segment (degenerate); reuse previous tangent
+            tangent[i] = tangent[i - 1] if i > 0 else np.array([1.0, 0.0, 0.0],
+                                                                dtype=np.float32)
+        else:
+            tangent[i] = d / nrm
+
+    up = np.tile(np.array([0.0, 0.0, 1.0], dtype=np.float32), (n, 1))
+    left = np.zeros((n, 3), dtype=np.float32)
+
+    # Initial left from world-up × tangent (planar). If that degenerates
+    # (tangent is parallel to up, i.e., vertical path), fall back to +Y.
+    init_left = np.cross(up[0], tangent[0])
+    if np.linalg.norm(init_left) < 1e-6:
+        init_left = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    left[0] = init_left / np.linalg.norm(init_left)
+
+    # Parallel transport: at each step rotate the previous left vector
+    # by the rotation that takes tangent[i-1] to tangent[i]. This keeps
+    # left smoothly varying without zero crossings.
+    for i in range(1, n):
+        t_prev = tangent[i - 1]
+        t_curr = tangent[i]
+        axis = np.cross(t_prev, t_curr)
+        s = np.linalg.norm(axis)
+        c = float(np.dot(t_prev, t_curr))
+        if s < 1e-8:
+            # Tangents nearly parallel — no rotation needed
+            left[i] = left[i - 1]
+        else:
+            axis = axis / s
+            angle = np.arctan2(s, c)
+            # Rodrigues' rotation formula on left[i-1]
+            v = left[i - 1]
+            left[i] = (
+                v * np.cos(angle)
+                + np.cross(axis, v) * np.sin(angle)
+                + axis * np.dot(axis, v) * (1.0 - np.cos(angle))
+            )
+        # Re-orthogonalize against the new tangent (numerical safety)
+        left[i] = left[i] - np.dot(left[i], t_curr) * t_curr
+        nrm = np.linalg.norm(left[i])
+        if nrm < 1e-6:
+            # Catastrophic loss — fall back to up × tangent
+            left[i] = np.cross(up[i], t_curr)
+            nrm = np.linalg.norm(left[i])
+            if nrm < 1e-6:
+                left[i] = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+                nrm = 1.0
+        left[i] = left[i] / nrm
+
+    # Re-derive up to be exactly perpendicular to (left, tangent) at each
+    # point — slight drift from parallel transport could make up not
+    # exactly world-z, which is fine and even desirable for banked tracks.
+    up = np.cross(tangent, left)
+    nrm = np.linalg.norm(up, axis=1, keepdims=True)
+    up = up / np.maximum(nrm, 1e-8)
 
     return positions, left, up, tangent
 
@@ -308,6 +367,7 @@ def spawn_duct_track(
     rib_resolution: int = 12,
     duct_color: tuple[float, float, float] = (1.0, 0.5, 0.0),
     rib_color: tuple[float, float, float] = (0.05, 0.05, 0.05),
+    make_rigid: bool = False,
 ) -> dict[str, Any]:
     """Spawn the duct mesh as two USD prims (`<prim>/duct` + `<prim>/ribs`).
 
@@ -316,7 +376,7 @@ def spawn_duct_track(
     dark to add contrast for both vision and LiDAR.
     """
     import omni.usd
-    from pxr import Gf, Sdf, UsdGeom, UsdPhysics, UsdShade, Vt
+    from pxr import Gf, PhysxSchema, Sdf, UsdGeom, UsdPhysics, UsdShade, Vt
 
     mesh_data = build_duct_mesh(
         track,
@@ -339,10 +399,48 @@ def spawn_duct_track(
         )
         mesh.GetFaceVertexCountsAttr().Set(Vt.IntArray([3] * len(faces_arr)))
         mesh.GetFaceVertexIndicesAttr().Set(Vt.IntArray(faces_arr.flatten().tolist()))
-        mesh.GetDoubleSidedAttr().Set(True)
+        # Hard-faceted rendering: explicitly disable subdivision so Hydra
+        # renders the triangles as-authored. Without this the default
+        # subdivisionScheme on UsdGeom.Mesh causes some renderers to apply
+        # Catmull-Clark smoothing, which rounds the rib's sharp corners
+        # into bulges that look like "twists" along the duct.
+        mesh.CreateSubdivisionSchemeAttr().Set("none")
+        # Author flat (face-varying) normals so the renderer doesn't
+        # average across rib seams and produce dark/inverted shading.
+        # Each triangle gets a normal computed from its own vertices.
+        v_arr = np.asarray(verts, dtype=np.float32)
+        f_arr = np.asarray(faces_arr, dtype=np.int64)
+        e1 = v_arr[f_arr[:, 1]] - v_arr[f_arr[:, 0]]
+        e2 = v_arr[f_arr[:, 2]] - v_arr[f_arr[:, 0]]
+        face_normals = np.cross(e1, e2)
+        n_len = np.linalg.norm(face_normals, axis=1, keepdims=True)
+        face_normals = face_normals / np.maximum(n_len, 1e-8)
+        # faceVarying: 1 normal per vertex per face → replicate per-face normal
+        fv_normals = np.repeat(face_normals, 3, axis=0)
+        mesh.CreateNormalsAttr().Set(
+            Vt.Vec3fArray([Gf.Vec3f(float(n[0]), float(n[1]), float(n[2]))
+                           for n in fv_normals])
+        )
+        mesh.SetNormalsInterpolation("faceVarying")
+        mesh.GetDoubleSidedAttr().Set(False)   # with proper normals, one-sided is fine
 
         UsdPhysics.CollisionAPI.Apply(mesh.GetPrim())
         UsdPhysics.MeshCollisionAPI.Apply(mesh.GetPrim()).GetApproximationAttr().Set("none")
+
+        if make_rigid:
+            # Promote the static collider to a KINEMATIC rigid body so it
+            # becomes a valid ContactSensor.force_matrix filter target
+            # (force_matrix only resolves rigid bodies). Kinematic = stays
+            # bolted in place like a static wall but is solver-visible, and
+            # kinematic bodies are allowed to keep triangle-mesh ("none")
+            # colliders. Contact-report API lets the sensor receive the
+            # car-vs-wall force directly — no net−Σ subtraction needed.
+            rb = UsdPhysics.RigidBodyAPI.Apply(mesh.GetPrim())
+            rb.CreateRigidBodyEnabledAttr().Set(True)
+            rb.CreateKinematicEnabledAttr().Set(True)
+            PhysxSchema.PhysxRigidBodyAPI.Apply(mesh.GetPrim())
+            cr = PhysxSchema.PhysxContactReportAPI.Apply(mesh.GetPrim())
+            cr.CreateThresholdAttr().Set(0.0)
 
         mat_path = path + "_Mat"
         mat = UsdShade.Material.Define(stage, mat_path)
@@ -359,6 +457,7 @@ def spawn_duct_track(
         f"{prim_path}/duct", mesh_data["duct_vertices"], mesh_data["duct_faces"], duct_color
     )
 
+    rigid_mesh_names = ["duct"]
     if len(mesh_data["rib_vertices"]) > 0:
         # Rib faces were indexed into the combined vertex array during
         # construction; rewind to local indices for the separate mesh prim.
@@ -366,5 +465,106 @@ def spawn_duct_track(
         _create_mesh(
             f"{prim_path}/ribs", mesh_data["rib_vertices"], rib_faces_local, rib_color
         )
+        rigid_mesh_names.append("ribs")
 
+    # Leaf names of the mesh prims (relative to ``prim_path``) that were
+    # promoted to kinematic rigid bodies — the env uses these to build the
+    # ContactSensor wall filter.
+    mesh_data["rigid_mesh_names"] = rigid_mesh_names if make_rigid else []
     return mesh_data
+
+
+def spawn_static_boxes(
+    prim_root: str,
+    frenet,
+    count: int,
+    *,
+    size: float = 0.5,
+    seed: int = 0,
+    lat_frac: float = 0.5,
+    random_color: bool = True,
+    side: str = "both",
+) -> list[str]:
+    """Spawn ``count`` static cube obstacles at random on-track positions.
+
+    Each box is a KINEMATIC rigid body (valid ContactSensor.force_matrix
+    filter target, like the duct walls) with a bright visual so the
+    vision policy can see and learn to avoid it. Positions are sampled at
+    random arc-lengths with a random lateral offset inside the track.
+
+    Returns the leaf names (relative to ``prim_root``) of the spawned
+    boxes so the env can add them to the collision filter.
+    """
+    if count <= 0:
+        return []
+    import omni.usd
+    from pxr import Gf, PhysxSchema, Sdf, UsdGeom, UsdPhysics, UsdShade
+
+    stage = omni.usd.get_context().get_stage()
+    UsdGeom.Xform.Define(stage, prim_root)
+
+    rng = np.random.default_rng(int(seed))
+    n_pts = int(frenet.num_points)
+    cl_xy = frenet.cl_xy.detach().cpu().numpy()        # (N, 2)
+    cl_nrm = frenet.cl_normal.detach().cpu().numpy()   # (N, 2) +left
+    cl_w = frenet.cl_widths.detach().cpu().numpy()     # (N, 2)
+    # random centerline indices + lateral offsets within the track
+    idx = rng.integers(0, n_pts, size=count)
+    cl = cl_xy[idx]                                    # (count, 2)
+    nrm = cl_nrm[idx]                                  # (count, 2)
+    half = np.minimum(cl_w[idx, 0], cl_w[idx, 1])      # (count,)
+    # Side-biased lateral offset. normal is +left, so the car's RIGHT is
+    # the negative direction. "right" keeps boxes in the policy's actual
+    # (right-hugging) line; magnitude 0.15..0.8 of the half-width.
+    r = rng.uniform(0.0, 1.0, size=count)
+    if side == "right":
+        lat = -(0.15 + 0.65 * r) * half
+    elif side == "left":
+        lat = (0.15 + 0.65 * r) * half
+    else:
+        lat = (2.0 * r - 1.0) * lat_frac * half
+    bx = cl[:, 0] + lat * nrm[:, 0]
+    by = cl[:, 1] + lat * nrm[:, 1]
+    # Per-box vivid random colour (saturated so it pops on camera). The
+    # learner generalises over an "obstacle = solid coloured box" concept
+    # rather than a single hue. Deterministic via the same seed.
+    if random_color:
+        base = rng.uniform(0.55, 1.0, size=(count, 3))
+        drop = rng.integers(0, 3, size=count)          # zero one channel
+        for j in range(count):
+            base[j, drop[j]] *= 0.12
+        box_colors = base
+    else:
+        box_colors = np.tile(np.array([0.9, 0.05, 0.05]), (count, 1))
+
+    names: list[str] = []
+    for k in range(count):
+        nm = f"box_{k}"
+        path = f"{prim_root}/{nm}"
+        cube = UsdGeom.Cube.Define(stage, path)
+        cube.GetSizeAttr().Set(float(size))
+        prim = cube.GetPrim()
+        UsdGeom.Xformable(prim).AddTranslateOp().Set(
+            Gf.Vec3d(float(bx[k]), float(by[k]), float(size) * 0.5)
+        )
+        UsdPhysics.CollisionAPI.Apply(prim)
+        rb = UsdPhysics.RigidBodyAPI.Apply(prim)
+        rb.CreateRigidBodyEnabledAttr().Set(True)
+        rb.CreateKinematicEnabledAttr().Set(True)
+        PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
+        cr = PhysxSchema.PhysxContactReportAPI.Apply(prim)
+        cr.CreateThresholdAttr().Set(0.0)
+        # bright visual so the camera (and learner) can see the obstacle
+        mat_path = path + "_Mat"
+        mat = UsdShade.Material.Define(stage, mat_path)
+        sh = UsdShade.Shader.Define(stage, mat_path + "/Shader")
+        sh.CreateIdAttr("UsdPreviewSurface")
+        c = box_colors[k]
+        sh.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
+            Gf.Vec3f(float(c[0]), float(c[1]), float(c[2]))
+        )
+        sh.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.7)
+        mat.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), "surface")
+        UsdShade.MaterialBindingAPI.Apply(prim).Bind(mat)
+        names.append(nm)
+    return names
